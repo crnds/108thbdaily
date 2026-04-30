@@ -224,10 +224,19 @@
     .compare-row.active .toggle-pill::after {
       transform: translateX(16px);
     }
+    .compare-row.disable-toggle-button { cursor: default; }
+    .compare-row.disable-toggle-button:hover { background: rgba(247,147,26,0.06); }
+    .compare-row.disable-toggle-button .toggle-pill { display: none; }
     .compare-dot {
       width: 9px; height: 9px;
       border-radius: 50%;
       flex-shrink: 0;
+    }
+    .compare-icon {
+      flex-shrink: 0;
+      display: block;
+      width: 22px;          /* fixed slot width so the three icons left-align cleanly */
+      height: auto;
     }
     .compare-label { font-size: 0.82rem; color: var(--text2); flex: 1; }
     .compare-return {
@@ -538,14 +547,35 @@
     <div>
       <div class="section-label" data-i18n="compareTo">Compare To</div>
       <div class="compare-list">
+        <div class="compare-row active disable-toggle-button" id="rowBTC">
+          <svg class="compare-icon" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+            <circle cx="9" cy="9" r="8" fill="#f7931a"/>
+            <text x="9" y="9.5" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="11" font-weight="700" font-family="system-ui, -apple-system, sans-serif">&#8383;</text>
+          </svg>
+          <span class="compare-label">Bitcoin</span>
+          <span class="compare-return" id="retBTC" style="color:var(--btc)"></span>
+          <span class="toggle-pill"></span>
+        </div>
         <div class="compare-row" id="rowSP500" onclick="toggleCompare('SP500')">
-          <span class="compare-dot" style="background:var(--sp500)"></span>
+          <svg class="compare-icon" width="22" height="14" viewBox="0 0 22 14" aria-hidden="true">
+            <rect x="1" y="1" width="20" height="12" rx="2" fill="#4ade80" stroke="#166534" stroke-width="0.8"/>
+            <text x="11" y="7.5" text-anchor="middle" dominant-baseline="central" fill="#064e2b" font-size="9" font-weight="700" font-family="system-ui, -apple-system, sans-serif">$</text>
+          </svg>
           <span class="compare-label">S&amp;P 500</span>
           <span class="compare-return" id="retSP500" style="color:var(--sp500)"></span>
           <span class="toggle-pill"></span>
         </div>
         <div class="compare-row" id="rowGold" onclick="toggleCompare('Gold')">
-          <span class="compare-dot" style="background:var(--gold)"></span>
+          <svg class="compare-icon" width="20" height="11" viewBox="0 0 20 11" aria-hidden="true">
+            <defs>
+              <linearGradient id="goldBarGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#fde68a"/>
+                <stop offset="50%" stop-color="#fbbf24"/>
+                <stop offset="100%" stop-color="#b45309"/>
+              </linearGradient>
+            </defs>
+            <rect x="1" y="1" width="18" height="9" rx="1.5" fill="url(#goldBarGrad)" stroke="#78350f" stroke-width="0.8"/>
+          </svg>
           <span class="compare-label">Gold</span>
           <span class="compare-return" id="retGold" style="color:var(--gold)"></span>
           <span class="toggle-pill"></span>
@@ -1390,6 +1420,7 @@ function updateStats(btcRows, sp500Rows, goldRows) {
   el('sAnnReturn').className   = 'stat-sub ' + (cagr >= 0 ? 'pos' : 'neg');
 
   // Comparison returns in sidebar
+  el('retBTC').textContent = (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
   if (sp500Rows?.length) {
     const sr = lastRow(sp500Rows);
     const spPct = sr.invested > 0 ? (sr.value - sr.invested) / sr.invested * 100 : 0;
