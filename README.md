@@ -1,4 +1,6 @@
-# 108THBDAILY — BTC DCA Calculator
+```
+𝟭𝟬𝟴𝗧𝗛𝗕𝗗𝗔𝗜𝗟𝗬 — 𝗕𝗧𝗖 𝗗𝗖𝗔 𝗖𝗮𝗹𝗰𝘂𝗹𝗮𝘁𝗼𝗿
+```
 
 A DCA calculator for the **108-1009 movement** — buying 108 THB of Bitcoin every day. Enter an amount, frequency, and start date to see total invested, portfolio value, P&L, BTC accumulated, and average buy price. Compare against S&P 500 or Gold side-by-side.
 
