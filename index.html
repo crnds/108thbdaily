@@ -556,7 +556,7 @@
           <span class="compare-return" id="retBTC" style="color:var(--btc)"></span>
           <span class="toggle-pill"></span>
         </div>
-        <div class="compare-row" id="rowSP500" onclick="toggleCompare('SP500')">
+        <div class="compare-row active" id="rowSP500" onclick="toggleCompare('SP500')">
           <svg class="compare-icon" width="22" height="14" viewBox="0 0 22 14" aria-hidden="true">
             <rect x="1" y="1" width="20" height="12" rx="2" fill="#4ade80" stroke="#166534" stroke-width="0.8"/>
             <text x="11" y="7.5" text-anchor="middle" dominant-baseline="central" fill="#064e2b" font-size="9" font-weight="700" font-family="system-ui, -apple-system, sans-serif">$</text>
@@ -565,7 +565,7 @@
           <span class="compare-return" id="retSP500" style="color:var(--sp500)"></span>
           <span class="toggle-pill"></span>
         </div>
-        <div class="compare-row" id="rowGold" onclick="toggleCompare('Gold')">
+        <div class="compare-row active" id="rowGold" onclick="toggleCompare('Gold')">
           <svg class="compare-icon" width="20" height="11" viewBox="0 0 20 11" aria-hidden="true">
             <defs>
               <linearGradient id="goldBarGrad" x1="0" y1="0" x2="0" y2="1">
@@ -1474,7 +1474,12 @@ async function calculate() {
 
   if (el('rowSP500').classList.contains('active')) {
     if (!state.sp500Prices) {
-      showLoading('Fetching S&P 500 data…', 'Please wait');
+      // Avoid flashing loading UI on initial load when compare data is pre-fetched locally
+      // (which is the case when S&P/Gold are enabled by default).
+      const hasLocalCompare = !!(window.LOCAL_PRICES_COMPARE && window.LOCAL_PRICES_COMPARE.sp500);
+      if (!hasLocalCompare) {
+        showLoading('Fetching S&P 500 data…', 'Please wait');
+      }
       try {
         const { data } = await fetchYahoo('^GSPC', 'sp500', 'S&P 500');
         state.sp500Prices = data;
@@ -1482,7 +1487,7 @@ async function calculate() {
         console.warn('S&P 500 fetch failed:', e);
         showError('S&P 500 data unavailable — CORS may be blocking the request. Try from a local server (python -m http.server).');
       }
-      hideLoading();
+      if (!hasLocalCompare) hideLoading();
     }
     if (state.sp500Prices) {
       sp500Rows = calcDCA(fillForward(state.sp500Prices, startStr, endStr), amount, freq, startStr, endStr);
@@ -1491,15 +1496,20 @@ async function calculate() {
 
   if (el('rowGold').classList.contains('active')) {
     if (!state.goldPrices) {
-      showLoading('Fetching Gold price data…', 'Please wait');
+      // Avoid flashing loading UI on initial load when compare data is pre-fetched locally
+      // (which is the case when S&P/Gold are enabled by default).
+      const hasLocalCompare = !!(window.LOCAL_PRICES_COMPARE && window.LOCAL_PRICES_COMPARE.gold);
+      if (!hasLocalCompare) {
+        showLoading('Fetching Gold price data…', 'Please wait');
+      }
       try {
-        const { data } = await fetchYahoo('GC=F', 'gold', 'Gold');
+        const { data } = await fetchYahoo('GLD', 'gold', 'Gold');
         state.goldPrices = data;
       } catch (e) {
         console.warn('Gold fetch failed:', e);
         showError('Gold data unavailable — CORS may be blocking. Try from a local server.');
       }
-      hideLoading();
+      if (!hasLocalCompare) hideLoading();
     }
     if (state.goldPrices) {
       goldRows = calcDCA(fillForward(state.goldPrices, startStr, endStr), amount, freq, startStr, endStr);
@@ -1627,6 +1637,10 @@ async function init() {
     hasLocal ? 'Loading BTC from local file…' : 'Fetching BTC from Kraken…',
     hasLocal ? 'Topping up recent days…'       : 'Run fetch_data.py once to use local data'
   );
+
+  // Eagerly start loading S&P/Gold compare data (prices-compare.js) so the lines
+  // render immediately when enabled by default (no extra loading flash in calculate()).
+  loadCompareData().catch(() => {});
 
   // Fetch FX rate in parallel with BTC data; both must be ready before first calculate()
   const fxPromise = fetchFXRate();

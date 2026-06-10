@@ -26,7 +26,7 @@ Daily · Weekly · Monthly · 1–10 year lookback · THB/USD toggle · % Return
 |---|---|---|
 | BTC | Binance klines | 2017-08-17 |
 | S&P 500 | Yahoo Finance | 2014-01-01 |
-| Gold (XAU/USD) | Yahoo Finance | 2014-01-01 |
+| Gold | Yahoo Finance (GLD ETF) | 2014-01-01 |
 
 Pre-fetched daily via GitHub Actions → `data/prices.js`. Kraken tops up any days since the last update.
 

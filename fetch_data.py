@@ -5,7 +5,7 @@ fetch_data.py — Download BTC, S&P 500, and Gold price history → data/prices.
 Sources (all free, no API key required):
   BTC      — Binance klines API  (data from 2017-08-17 onward)
   S&P 500  — yfinance  ^GSPC     (data from 2014 onward)
-  Gold     — yfinance  GC=F      (data from 2014 onward)
+  Gold     — yfinance  GLD       (SPDR Gold Shares ETF; clean spot proxy, no futures-roll artifacts)
 
 Requirements:
   pip install yfinance            (one-time install)
@@ -118,14 +118,97 @@ def fetch_yf(symbol, label):
     if df.empty:
         raise RuntimeError(f'yfinance returned no data for {symbol}')
 
-    # Flatten multi-level columns if present
+    # Flatten multi-level columns if present (handles both real MultiIndex and
+    # the stringified-tuple columns that some yfinance + auto_adjust downloads produce).
     if hasattr(df.columns, 'levels'):
         df.columns = df.columns.get_level_values(0)
+    else:
+        # Repair columns like "('Close', 'GLD')" -> "Close"
+        new_cols = []
+        for c in df.columns:
+            cs = str(c)
+            if cs.startswith("('") and cs.endswith("')"):
+                # extract first element of the apparent tuple repr
+                inner = cs[2:-2]
+                first = inner.split("', '")[0].strip("'")
+                new_cols.append(first)
+            else:
+                new_cols.append(cs)
+        df.columns = new_cols
+
+    # Find a usable close column (some downloads use 'Close', others 'Adj Close' etc.)
+    close_col = None
+    for c in df.columns:
+        cl = str(c).lower()
+        if cl in ('close', 'adj close', 'adjclose'):
+            close_col = c
+            break
+    if close_col is None:
+        # Fallback to first numeric column
+        for c in df.columns:
+            if df[c].dtype.kind in 'fi':  # float or int
+                close_col = c
+                break
+    if close_col is None:
+        raise RuntimeError(f'Could not locate close price column for {symbol}')
 
     prices = {}
-    for dt, row in df['Close'].items():
-        if row == row:    # skip NaN
-            prices[dt.strftime('%Y-%m-%d')] = round(float(row), 2)
+    for dt, val in df[close_col].items():
+        if val == val:  # skip NaN
+            prices[dt.strftime('%Y-%m-%d')] = round(float(val), 2)
+
+    # Light outlier repair for traditional assets (S&P, Gold) in the *recent* window only.
+    # We target bad ticks from the data provider that have appeared in the last ~4 months.
+    # Legitimate historical crashes (e.g. 2020 COVID -10% days) are left untouched so that
+    # long-term DCA simulations remain accurate. Recent >7% single-trading-day moves are
+    # treated as glitches and replaced by linear interpolation between the nearest good
+    # neighboring closes (or prev close if no future neighbor yet).
+    if label != 'BTC':
+        from datetime import datetime as dtmod, timedelta as tdelta
+        # Gold is more prone to bad recent prints from yfinance (futures/ETF roll issues)
+        # so we watch a longer window and use a slightly tighter threshold for it.
+        CLEAN_WINDOW_DAYS = 200 if label == 'Gold' else 120
+        THRESHOLD = 0.05 if label == 'Gold' else 0.07  # 5% gold, 7% equities
+
+        sorted_ds = sorted(prices)
+        if sorted_ds:
+            today_d = dtmod.strptime(sorted_ds[-1], '%Y-%m-%d').date()
+            cutoff = today_d - tdelta(days=CLEAN_WINDOW_DAYS)
+
+            # First pass: identify recent candidates vs their immediate prior good close
+            prev_p = None
+            prev_ds = None
+            candidates = []  # list of (ds, original_p, prev_good_p)
+            for ds in sorted_ds:
+                p = prices[ds]
+                d = dtmod.strptime(ds, '%Y-%m-%d').date()
+                is_recent = d >= cutoff
+                if prev_p is not None and p is not None and prev_p > 0 and is_recent:
+                    chg = abs((p - prev_p) / prev_p)
+                    if chg > THRESHOLD:
+                        candidates.append((ds, p, prev_p))
+                if p is not None:
+                    prev_p = p
+                    prev_ds = ds
+
+            # Second pass: for each bad recent day, try to interpolate with next good close
+            cleaned = 0
+            for ds, bad_p, prev_good in candidates:
+                # find next good close after this ds
+                next_good = None
+                for later in sorted_ds:
+                    if later > ds and prices[later] is not None:
+                        next_good = prices[later]
+                        break
+                if next_good is not None and prev_good > 0:
+                    interp = (prev_good + next_good) / 2.0
+                else:
+                    interp = prev_good
+                prices[ds] = round(interp, 2)
+                cleaned += 1
+
+            if cleaned:
+                log(f'  (repaired {cleaned} suspicious recent >{int(THRESHOLD*100)}% moves)')
 
     log(f'{len(prices)} days  (from {min(prices)})')
     return prices
@@ -172,13 +255,13 @@ def main():
     log(f'  Date  : {today}')
     log(f'  BTC   : 2017-08-17 → today  (Binance)')
     log(f'  S&P   : 2014-01-01 → today  (Yahoo Finance)')
-    log(f'  Gold  : 2014-01-01 → today  (Yahoo Finance)')
+    log(f'  Gold  : 2014-01-01 → today  (Yahoo Finance via GLD ETF)')
     log('=' * 52)
     log()
 
     btc   = fetch_btc()
     sp500 = fetch_yf('^GSPC', 'S&P 500')
-    gold  = fetch_yf('GC=F',  'Gold')
+    gold  = fetch_yf('GLD',   'Gold')
 
     # Main file — BTC only (loaded on every page view)
     main_payload = {
