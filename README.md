@@ -33,15 +33,21 @@ Daily · Weekly · Monthly · 1–10 year lookback · THB/USD toggle · % Return
 - Both files are kept up to date by a GitHub Action that runs `fetch_data.py --force` every day.
 - Gold uses the GLD ETF series (cleaner than raw futures) plus automatic repair for occasional bad recent prints from the data provider.
 
-## Running locally
+## On GitHub Pages (recommended)
+
+The site is designed to work great directly on GitHub Pages using the daily pre-fetched data (no local server needed). S&P 500 and Gold comparisons are enabled by default. A small "pre-fetched • as of ..." note appears when using compare data.
+
+The GitHub Action automatically updates both price files every day.
+
+## Running locally (optional, for freshest compare data)
 
 ```bash
 open index.html                 # no build step needed
-python3 -m http.server 8080    # recommended when using compare mode (avoids CORS for live fallbacks)
+# python3 -m http.server 8080  # only needed if you want to test live Yahoo fallbacks
 ```
 
 ```bash
 pip install yfinance
 python3 fetch_data.py           # skip if up to date
-python3 fetch_data.py --force   # re-download everything
+python3 fetch_data.py --force   # re-download everything (recommended after pulling the repo)
 ```

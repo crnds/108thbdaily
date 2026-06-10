@@ -224,6 +224,17 @@
     .compare-row.active .toggle-pill::after {
       transform: translateX(16px);
     }
+
+    .compare-asof {
+      font-size: 0.62rem;
+      color: var(--dim);
+      opacity: 0.8;
+      margin-left: 3px;
+      white-space: nowrap;
+    }
+    .compare-row:not(.active) .compare-asof {
+      display: none;
+    }
     .compare-row.disable-toggle-button { cursor: default; }
     .compare-row.disable-toggle-button:hover { background: rgba(247,147,26,0.06); }
     .compare-row.disable-toggle-button .toggle-pill { display: none; }
@@ -546,6 +557,7 @@
 
     <div>
       <div class="section-label" data-i18n="compareTo">Compare To</div>
+      <div id="compareDataNote" style="font-size:0.65rem; color:var(--dim); margin-top:-4px; margin-bottom:6px;"></div>
       <div class="compare-list">
         <div class="compare-row active disable-toggle-button" id="rowBTC">
           <svg class="compare-icon" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
@@ -563,6 +575,7 @@
           </svg>
           <span class="compare-label">S&amp;P 500</span>
           <span class="compare-return" id="retSP500" style="color:var(--sp500)"></span>
+          <span class="compare-asof" id="asofSP500"></span>
           <span class="toggle-pill"></span>
         </div>
         <div class="compare-row active" id="rowGold" onclick="toggleCompare('Gold')">
@@ -578,6 +591,7 @@
           </svg>
           <span class="compare-label">Gold</span>
           <span class="compare-return" id="retGold" style="color:var(--gold)"></span>
+          <span class="compare-asof" id="asofGold"></span>
           <span class="toggle-pill"></span>
         </div>
       </div>
@@ -648,9 +662,9 @@
   <span>created by <a href="https://x.com/cornerdusit" target="_blank" rel="noopener" style="color:var(--dim);text-decoration:underline;">@cornerdusit</a>, with inspiration from dcabtc.com</span>
 </footer>
 
-<!-- Local price data written by fetch_data.py — loaded before the main script.
-     If the file is missing, window.LOCAL_PRICES stays undefined and the app
-     falls back to live API fetching automatically. -->
+<!-- Pre-fetched price data (maintained by GitHub Action + fetch_data.py).
+     BTC is always topped up live from Kraken. S&P/Gold come from the companion file
+     (injected on demand). This is the primary data source for the hosted GitHub Pages site. -->
 <script src="./data/prices.js"></script>
 
 <script>
@@ -667,6 +681,10 @@ const CACHE_VER = 'dcabtc_v3_';
 const CG_BASE   = 'https://api.coingecko.com/api/v3';
 const YF_BASE   = 'https://query1.finance.yahoo.com/v8/finance/chart';
 const DATA_FROM = new Date('2014-01-01T00:00:00Z');
+
+const COMPARE_STALE_DAYS = 3;  // after this many days, try live top-up for S&P/Gold and show "as of"
+
+const isGitHubPages = /github\.io$/.test(location.hostname);
 
 const state = {
   btcPrices:    null,
@@ -788,6 +806,15 @@ function loadCompareData() {
 // ═══════════════════════════════════════════════
 function todayStr() {
   return new Date().toISOString().split('T')[0];
+}
+
+function isStaleDate(dateStr, thresholdDays = COMPARE_STALE_DAYS) {
+  if (!dateStr) return true;
+  const d = new Date(dateStr + 'T00:00:00Z');
+  const cutoff = new Date();
+  cutoff.setUTCDate(cutoff.getUTCDate() - thresholdDays);
+  cutoff.setUTCHours(0, 0, 0, 0);
+  return d < cutoff;
 }
 
 function cacheSet(key, data) {
@@ -937,21 +964,32 @@ async function fetchYahoo(symbol, cacheKey, label) {
 
   // 2. Local file (data/prices-compare.js written by fetch_data.py) — lazy-loaded.
   //    cacheKey is 'sp500' or 'gold' — matches the keys in LOCAL_PRICES_COMPARE.
+  let localForCompare = null;
   try {
     el('loadingMsg').textContent = `Loading ${label} from local file…`;
     await loadCompareData();
     const local = expandSeries(window.LOCAL_PRICES_COMPARE?.[cacheKey]);
     if (local && Object.keys(local).length > 100) {
+      localForCompare = local;
       cacheSet(cacheKey, local);
-      return { data: local, fromCache: false };
+
+      // If the pre-fetched compare data is fresh, use it immediately.
+      // Otherwise fall through and attempt live Yahoo (best-effort top-up).
+      const last = Object.keys(local).sort().pop();
+      if (!isStaleDate(last, COMPARE_STALE_DAYS)) {
+        return { data: local, fromCache: false };
+      }
     }
   } catch (_) {
     // Compare file missing or failed to load — fall through to live fetch.
   }
 
   // 3. Live fetch — tries Yahoo Finance direct, then CORS proxies
+  // (we reach here for BTC fallback, or when compare local data is stale)
   el('loadingMsg').textContent    = `Fetching ${label} from Yahoo Finance…`;
-  el('loadingSubMsg').textContent = 'Run fetch_data.py once to skip live fetching';
+  el('loadingSubMsg').textContent = isGitHubPages
+    ? 'Compare data is refreshed daily by the GitHub Action'
+    : 'Run fetch_data.py once to skip live fetching';
 
   const from = Math.floor(DATA_FROM.getTime() / 1000);
   const to   = Math.floor(Date.now() / 1000);
@@ -974,10 +1012,27 @@ async function fetchYahoo(symbol, cacheKey, label) {
       const json   = await res.json();
       const prices = parseYahooJSON(json);
       if (prices) {
+        // Prefer the fresher of (stale local vs live) when doing best-effort top-up for compares
+        if (localForCompare) {
+          const localLast = Object.keys(localForCompare).sort().pop();
+          const liveLast = Object.keys(prices).sort().pop();
+          if (liveLast && (!localLast || liveLast >= localLast)) {
+            cacheSet(cacheKey, prices);
+            return { data: prices, fromCache: false };
+          } else {
+            return { data: localForCompare, fromCache: false };
+          }
+        }
         cacheSet(cacheKey, prices);
         return { data: prices, fromCache: false };
       }
     } catch { /* try next */ }
+  }
+
+  // Live attempts failed — if we had a (possibly stale) local compare file, fall back to it
+  // instead of hard error. This keeps the UI working while the user can run fetch_data.py.
+  if (localForCompare) {
+    return { data: localForCompare, fromCache: false };
   }
 
   throw new Error(`All sources failed for ${label}. Run fetch_data.py to use local data.`);
@@ -1425,15 +1480,19 @@ function updateStats(btcRows, sp500Rows, goldRows) {
     const sr = lastRow(sp500Rows);
     const spPct = sr.invested > 0 ? (sr.value - sr.invested) / sr.invested * 100 : 0;
     el('retSP500').textContent = (spPct >= 0 ? '+' : '') + spPct.toFixed(1) + '%';
+    el('asofSP500').textContent = sr ? 'as of ' + fmtShortDate(sr.date) : '';
   } else {
     el('retSP500').textContent = '';
+    el('asofSP500').textContent = '';
   }
   if (goldRows?.length) {
     const gr = lastRow(goldRows);
     const gPct = gr.invested > 0 ? (gr.value - gr.invested) / gr.invested * 100 : 0;
     el('retGold').textContent = (gPct >= 0 ? '+' : '') + gPct.toFixed(1) + '%';
+    el('asofGold').textContent = gr ? 'as of ' + fmtShortDate(gr.date) : '';
   } else {
     el('retGold').textContent = '';
+    el('asofGold').textContent = '';
   }
 }
 
@@ -1474,9 +1533,10 @@ async function calculate() {
 
   if (el('rowSP500').classList.contains('active')) {
     if (!state.sp500Prices) {
-      // Avoid flashing loading UI on initial load when compare data is pre-fetched locally
-      // (which is the case when S&P/Gold are enabled by default).
-      const hasLocalCompare = !!(window.LOCAL_PRICES_COMPARE && window.LOCAL_PRICES_COMPARE.sp500);
+      // On GitHub Pages we almost always have the static pre-fetched file.
+      // Avoid any loading overlay for compares on gh-pages to keep the experience clean.
+      const hasLocalCompare = isGitHubPages
+        || !!(window.LOCAL_PRICES_COMPARE && window.LOCAL_PRICES_COMPARE.sp500);
       if (!hasLocalCompare) {
         showLoading('Fetching S&P 500 data…', 'Please wait');
       }
@@ -1485,20 +1545,31 @@ async function calculate() {
         state.sp500Prices = data;
       } catch (e) {
         console.warn('S&P 500 fetch failed:', e);
-        showError('S&P 500 data unavailable — CORS may be blocking the request. Try from a local server (python -m http.server).');
+        if (isGitHubPages) {
+          console.warn('Live S&P refresh failed on GitHub Pages (expected due to CORS). Using pre-fetched data from the repo.');
+        } else {
+          showError('S&P 500 data unavailable — CORS may be blocking the request. Try from a local server (python -m http.server).');
+        }
       }
       if (!hasLocalCompare) hideLoading();
     }
     if (state.sp500Prices) {
-      sp500Rows = calcDCA(fillForward(state.sp500Prices, startStr, endStr), amount, freq, startStr, endStr);
+      // Cap at the last *real* trading day present in the pre-fetched data.
+      // This prevents long artificial flat lines at the end when the local
+      // S&P/Gold data is a few days behind "today" (unlike BTC which has Kraken top-up).
+      const dates = Object.keys(state.sp500Prices).sort();
+      const last = dates[dates.length - 1];
+      const effectiveEnd = last && last < endStr ? last : endStr;
+      sp500Rows = calcDCA(fillForward(state.sp500Prices, startStr, effectiveEnd), amount, freq, startStr, effectiveEnd);
     }
   }
 
   if (el('rowGold').classList.contains('active')) {
     if (!state.goldPrices) {
-      // Avoid flashing loading UI on initial load when compare data is pre-fetched locally
-      // (which is the case when S&P/Gold are enabled by default).
-      const hasLocalCompare = !!(window.LOCAL_PRICES_COMPARE && window.LOCAL_PRICES_COMPARE.gold);
+      // On GitHub Pages we almost always have the static pre-fetched file.
+      // Avoid any loading overlay for compares on gh-pages to keep the experience clean.
+      const hasLocalCompare = isGitHubPages
+        || !!(window.LOCAL_PRICES_COMPARE && window.LOCAL_PRICES_COMPARE.gold);
       if (!hasLocalCompare) {
         showLoading('Fetching Gold price data…', 'Please wait');
       }
@@ -1507,13 +1578,34 @@ async function calculate() {
         state.goldPrices = data;
       } catch (e) {
         console.warn('Gold fetch failed:', e);
-        showError('Gold data unavailable — CORS may be blocking. Try from a local server.');
+        if (isGitHubPages) {
+          console.warn('Live Gold refresh failed on GitHub Pages (expected due to CORS). Using pre-fetched data from the repo.');
+        } else {
+          showError('Gold data unavailable — CORS may be blocking. Try from a local server.');
+        }
       }
       if (!hasLocalCompare) hideLoading();
     }
     if (state.goldPrices) {
-      goldRows = calcDCA(fillForward(state.goldPrices, startStr, endStr), amount, freq, startStr, endStr);
+      // Cap at the last *real* trading day present in the pre-fetched data.
+      // This prevents long artificial flat lines at the end when the local
+      // S&P/Gold data is a few days behind "today" (unlike BTC which has Kraken top-up).
+      const dates = Object.keys(state.goldPrices).sort();
+      const last = dates[dates.length - 1];
+      const effectiveEnd = last && last < endStr ? last : endStr;
+      goldRows = calcDCA(fillForward(state.goldPrices, startStr, effectiveEnd), amount, freq, startStr, effectiveEnd);
     }
+  }
+
+  // Global note for compare data freshness — very useful on GitHub Pages
+  // where live refreshes are limited by CORS and the static files come from the Action.
+  const compareNote = el('compareDataNote');
+  if ((el('rowSP500').classList.contains('active') || el('rowGold').classList.contains('active')) && window.LOCAL_PRICES_COMPARE?.updated) {
+    compareNote.textContent = `pre-fetched • as of ${window.LOCAL_PRICES_COMPARE.updated}`;
+    compareNote.style.display = '';
+  } else {
+    compareNote.textContent = '';
+    compareNote.style.display = 'none';
   }
 
   renderChart(btcRows, sp500Rows, goldRows);
@@ -1566,6 +1658,12 @@ function fmtCompact(v) {
 
 function fmtDate(d) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function fmtShortDate(dateStr) {
+  // Compact "Jun 8" style for freshness indicators
+  const d = new Date(dateStr + 'T00:00:00Z');
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 // Update label under Purchase Amount input
@@ -1635,7 +1733,9 @@ async function init() {
   const hasLocal = Array.isArray(window.LOCAL_PRICES?.btc?.close) && window.LOCAL_PRICES.btc.close.length > 100;
   showLoading(
     hasLocal ? 'Loading BTC from local file…' : 'Fetching BTC from Kraken…',
-    hasLocal ? 'Topping up recent days…'       : 'Run fetch_data.py once to use local data'
+    hasLocal
+      ? (isGitHubPages ? 'Daily updates via GitHub Actions' : 'Topping up recent days…')
+      : 'Topping up recent days…'
   );
 
   // Eagerly start loading S&P/Gold compare data (prices-compare.js) so the lines
@@ -1682,7 +1782,10 @@ el('startingYearsAgo').addEventListener('change', () => { if (state.btcPrices) c
 function toggleCompare(which) {
   const row = el('row' + which);
   const isOn = row.classList.toggle('active');
-  if (!isOn) el('ret' + which).textContent = '';
+  if (!isOn) {
+    el('ret' + which).textContent = '';
+    el('asof' + which).textContent = '';
+  }
   if (state.btcPrices) calculate();
 }
 
