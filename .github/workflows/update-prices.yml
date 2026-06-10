@@ -2,7 +2,7 @@ name: Update price data
 
 on:
   schedule:
-    - cron: '0 1 * * *'   # 01:00 UTC daily
+    - cron: '0 */6 * * *'   # every 6 hours UTC (keeps S&P/Gold compare data reasonably fresh vs BTC's live top-up)
   workflow_dispatch:        # allow manual runs from GitHub UI
 
 permissions:

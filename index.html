@@ -873,6 +873,59 @@ async function krakenTopUp(base) {
   }
 }
 
+// Best-effort recent top-up for S&P/Gold using Yahoo (lightweight, recent window only).
+// This helps keep compare data closer to BTC's live freshness on GitHub Pages,
+// where the static prices-compare.js may be several hours old between Action runs.
+// We only fetch a short recent period and merge newer closes on top of the base.
+async function yahooRecentTopUp(base, symbol) {
+  if (!base || Object.keys(base).length === 0) return base;
+
+  const dates = Object.keys(base).sort();
+  const lastDate = dates[dates.length - 1];
+  if (!lastDate) return base;
+
+  // Start a bit before the last known date to catch any corrections + cover weekends
+  const fromTs = Math.floor(new Date(lastDate + 'T00:00:00Z').getTime() / 1000) - (86400 * 7);
+  const toTs = Math.floor(Date.now() / 1000);
+
+  const baseUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&period1=${fromTs}&period2=${toTs}`;
+  const attempts = [
+    baseUrl,
+    baseUrl.replace('query1', 'query2'),
+    `https://corsproxy.io/?${encodeURIComponent(baseUrl)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(baseUrl)}`,
+  ];
+
+  for (const url of attempts) {
+    try {
+      const res = await fetchT(url, 8000);
+      if (!res.ok) continue;
+      const json = await res.json();
+      const recent = parseYahooJSON(json);
+      if (!recent || Object.keys(recent).length === 0) continue;
+
+      const merged = { ...base };
+      let improved = false;
+
+      for (const [d, p] of Object.entries(recent)) {
+        const current = merged[d];
+        if (current == null || d > lastDate || p !== current) {
+          merged[d] = p;
+          improved = true;
+        }
+      }
+
+      if (improved) {
+        return merged;
+      }
+    } catch {
+      // try next proxy / endpoint
+    }
+  }
+
+  return base; // no improvement found
+}
+
 async function fetchBTC() {
   const local      = expandSeries(window.LOCAL_PRICES?.btc);
   const localDays  = local ? Object.keys(local).length : 0;
@@ -1543,6 +1596,10 @@ async function calculate() {
       try {
         const { data } = await fetchYahoo('^GSPC', 'sp500', 'S&P 500');
         state.sp500Prices = data;
+
+        // On GitHub Pages (and in general) try a lightweight recent top-up so S&P
+        // stays reasonably close to BTC's live Kraken freshness between Action runs.
+        state.sp500Prices = await yahooRecentTopUp(state.sp500Prices, '^GSPC');
       } catch (e) {
         console.warn('S&P 500 fetch failed:', e);
         if (isGitHubPages) {
@@ -1554,9 +1611,8 @@ async function calculate() {
       if (!hasLocalCompare) hideLoading();
     }
     if (state.sp500Prices) {
-      // Cap at the last *real* trading day present in the pre-fetched data.
-      // This prevents long artificial flat lines at the end when the local
-      // S&P/Gold data is a few days behind "today" (unlike BTC which has Kraken top-up).
+      // Cap at the last *real* trading day present in the (possibly topped-up) data.
+      // This prevents long artificial flat lines at the end.
       const dates = Object.keys(state.sp500Prices).sort();
       const last = dates[dates.length - 1];
       const effectiveEnd = last && last < endStr ? last : endStr;
@@ -1576,6 +1632,10 @@ async function calculate() {
       try {
         const { data } = await fetchYahoo('GLD', 'gold', 'Gold');
         state.goldPrices = data;
+
+        // On GitHub Pages (and in general) try a lightweight recent top-up so Gold
+        // stays reasonably close to BTC's live Kraken freshness between Action runs.
+        state.goldPrices = await yahooRecentTopUp(state.goldPrices, 'GLD');
       } catch (e) {
         console.warn('Gold fetch failed:', e);
         if (isGitHubPages) {
@@ -1587,9 +1647,8 @@ async function calculate() {
       if (!hasLocalCompare) hideLoading();
     }
     if (state.goldPrices) {
-      // Cap at the last *real* trading day present in the pre-fetched data.
-      // This prevents long artificial flat lines at the end when the local
-      // S&P/Gold data is a few days behind "today" (unlike BTC which has Kraken top-up).
+      // Cap at the last *real* trading day present in the (possibly topped-up) data.
+      // This prevents long artificial flat lines at the end.
       const dates = Object.keys(state.goldPrices).sort();
       const last = dates[dates.length - 1];
       const effectiveEnd = last && last < endStr ? last : endStr;
