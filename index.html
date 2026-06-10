@@ -225,16 +225,6 @@
       transform: translateX(16px);
     }
 
-    .compare-asof {
-      font-size: 0.62rem;
-      color: var(--dim);
-      opacity: 0.8;
-      margin-left: 3px;
-      white-space: nowrap;
-    }
-    .compare-row:not(.active) .compare-asof {
-      display: none;
-    }
     .compare-row.disable-toggle-button { cursor: default; }
     .compare-row.disable-toggle-button:hover { background: rgba(247,147,26,0.06); }
     .compare-row.disable-toggle-button .toggle-pill { display: none; }
@@ -575,7 +565,6 @@
           </svg>
           <span class="compare-label">S&amp;P 500</span>
           <span class="compare-return" id="retSP500" style="color:var(--sp500)"></span>
-          <span class="compare-asof" id="asofSP500"></span>
           <span class="toggle-pill"></span>
         </div>
         <div class="compare-row active" id="rowGold" onclick="toggleCompare('Gold')">
@@ -591,7 +580,6 @@
           </svg>
           <span class="compare-label">Gold</span>
           <span class="compare-return" id="retGold" style="color:var(--gold)"></span>
-          <span class="compare-asof" id="asofGold"></span>
           <span class="toggle-pill"></span>
         </div>
       </div>
@@ -1011,9 +999,14 @@ function parseYahooJSON(json) {
 }
 
 async function fetchYahoo(symbol, cacheKey, label) {
-  // 1. Same-day localStorage cache
+  // 1. Same-day localStorage cache — only trust it if the series itself is fresh.
+  //    (A stale series can get cached under today's date stamp if the page was
+  //    loaded before the daily data deploy; fall through to the local file then.)
   const cached = cacheGet(cacheKey);
-  if (cached) return { data: cached, fromCache: true };
+  if (cached) {
+    const lastCached = Object.keys(cached).sort().pop();
+    if (!isStaleDate(lastCached, COMPARE_STALE_DAYS)) return { data: cached, fromCache: true };
+  }
 
   // 2. Local file (data/prices-compare.js written by fetch_data.py) — lazy-loaded.
   //    cacheKey is 'sp500' or 'gold' — matches the keys in LOCAL_PRICES_COMPARE.
@@ -1533,19 +1526,15 @@ function updateStats(btcRows, sp500Rows, goldRows) {
     const sr = lastRow(sp500Rows);
     const spPct = sr.invested > 0 ? (sr.value - sr.invested) / sr.invested * 100 : 0;
     el('retSP500').textContent = (spPct >= 0 ? '+' : '') + spPct.toFixed(1) + '%';
-    el('asofSP500').textContent = sr ? 'as of ' + fmtShortDate(sr.date) : '';
   } else {
     el('retSP500').textContent = '';
-    el('asofSP500').textContent = '';
   }
   if (goldRows?.length) {
     const gr = lastRow(goldRows);
     const gPct = gr.invested > 0 ? (gr.value - gr.invested) / gr.invested * 100 : 0;
     el('retGold').textContent = (gPct >= 0 ? '+' : '') + gPct.toFixed(1) + '%';
-    el('asofGold').textContent = gr ? 'as of ' + fmtShortDate(gr.date) : '';
   } else {
     el('retGold').textContent = '';
-    el('asofGold').textContent = '';
   }
 }
 
@@ -1719,12 +1708,6 @@ function fmtDate(d) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function fmtShortDate(dateStr) {
-  // Compact "Jun 8" style for freshness indicators
-  const d = new Date(dateStr + 'T00:00:00Z');
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
 // Update label under Purchase Amount input
 function setFreq(btn) {
   document.querySelectorAll('.freq-tab').forEach(b => b.classList.remove('active'));
@@ -1843,7 +1826,6 @@ function toggleCompare(which) {
   const isOn = row.classList.toggle('active');
   if (!isOn) {
     el('ret' + which).textContent = '';
-    el('asof' + which).textContent = '';
   }
   if (state.btcPrices) calculate();
 }
