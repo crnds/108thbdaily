@@ -4,9 +4,16 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
   <title>108THBDAILY</title>
-  <link rel="preload" href="./data/prices.js" as="script">
-  <script src="./vendor/chart.umd.min.js"></script>
-  <script src="./vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <!-- Warm up connections for the APIs used right after load (ticker, top-ups, FX) -->
+  <link rel="preconnect" href="https://api.binance.com" crossorigin>
+  <link rel="preconnect" href="https://api.kraken.com" crossorigin>
+  <link rel="preconnect" href="https://open.er-api.com" crossorigin>
+  <link rel="preconnect" href="https://corsproxy.io" crossorigin>
+  <!-- Compare data is injected lazily by loadCompareData(); preloading it makes that injection instant -->
+  <link rel="preload" href="./data/prices-compare.js" as="script">
+  <!-- defer: download in parallel, execute after parse — nothing blocks first paint -->
+  <script src="./vendor/chart.umd.min.js" defer></script>
+  <script src="./data/prices.js" defer></script>
   <style>
     :root {
       --bg: #08090d;
@@ -478,6 +485,7 @@
   </style>
 </head>
 <body>
+<script>try{if(localStorage.getItem('theme')==='light')document.body.classList.add('light-mode')}catch(_){}</script>
 
 <div id="loadingOverlay">
   <div class="spinner"></div>
@@ -653,8 +661,6 @@
 <!-- Pre-fetched price data (maintained by GitHub Action + fetch_data.py).
      BTC is always topped up live from Kraken. S&P/Gold come from the companion file
      (injected on demand). This is the primary data source for the hosted GitHub Pages site. -->
-<script src="./data/prices.js"></script>
-
 <script>
 // ═══════════════════════════════════════════════
 // INLINE ICONS (replaces Font Awesome)
@@ -665,7 +671,7 @@ const SVG_MOON = '<svg width="14" height="14" viewBox="0 0 384 512" fill="curren
 // ═══════════════════════════════════════════════
 // CONFIG & STATE
 // ═══════════════════════════════════════════════
-const CACHE_VER = 'dcabtc_v3_';
+const CACHE_VER = 'dcabtc_v4_';
 const CG_BASE   = 'https://api.coingecko.com/api/v3';
 const YF_BASE   = 'https://query1.finance.yahoo.com/v8/finance/chart';
 const DATA_FROM = new Date('2014-01-01T00:00:00Z');
@@ -820,6 +826,45 @@ function cacheGet(key) {
   } catch (_) { return null; }
 }
 
+// Read a cache entry regardless of which day it was written ({d, v} or null).
+function cacheGetEntry(key) {
+  try {
+    const raw = localStorage.getItem(CACHE_VER + key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) { return null; }
+}
+
+// Price series are cached in the compact {start, close[]} format (same shape
+// as the data files) — about half the size of the expanded {date: price} dict
+// and much faster to JSON.parse. They are carried across days; freshness is
+// judged from the series content (isStaleDate), not the write date.
+function compactSeries(prices) {
+  const dates = Object.keys(prices).sort();
+  if (!dates.length) return null;
+  const startMs = new Date(dates[0] + 'T00:00:00Z').getTime();
+  const span = Math.round((new Date(dates[dates.length - 1] + 'T00:00:00Z').getTime() - startMs) / 86400000) + 1;
+  const close = new Array(span).fill(null);
+  for (const ds of dates) {
+    close[Math.round((new Date(ds + 'T00:00:00Z').getTime() - startMs) / 86400000)] = prices[ds];
+  }
+  return { start: dates[0], close };
+}
+
+function seriesCacheSet(key, prices) {
+  try {
+    const s = compactSeries(prices);
+    if (s) localStorage.setItem(CACHE_VER + key, JSON.stringify({ d: todayStr(), s }));
+  } catch (_) {}
+}
+
+function seriesCacheGet(key) {
+  try {
+    const raw = localStorage.getItem(CACHE_VER + key);
+    if (!raw) return null;
+    return expandSeries(JSON.parse(raw).s);
+  } catch (_) { return null; }
+}
+
 // ═══════════════════════════════════════════════
 // LOADING UI
 // ═══════════════════════════════════════════════
@@ -884,59 +929,34 @@ async function yahooRecentTopUp(base, symbol) {
     `https://api.allorigins.win/raw?url=${encodeURIComponent(baseUrl)}`,
   ];
 
-  for (const url of attempts) {
-    try {
-      const res = await fetchT(url, 8000);
-      if (!res.ok) continue;
-      const json = await res.json();
-      const recent = parseYahooJSON(json);
-      if (!recent || Object.keys(recent).length === 0) continue;
+  const recent = await raceYahooAttempts(attempts, 8000, j => parseYahooJSON(j, 1));
+  if (!recent) return base;
 
-      const merged = { ...base };
-      let improved = false;
-
-      for (const [d, p] of Object.entries(recent)) {
-        const current = merged[d];
-        if (current == null || d > lastDate || p !== current) {
-          merged[d] = p;
-          improved = true;
-        }
-      }
-
-      if (improved) {
-        return merged;
-      }
-    } catch {
-      // try next proxy / endpoint
+  const merged = { ...base };
+  let improved = false;
+  for (const [d, p] of Object.entries(recent)) {
+    const current = merged[d];
+    if (current == null || d > lastDate || p !== current) {
+      merged[d] = p;
+      improved = true;
     }
   }
-
-  return base; // no improvement found
+  return improved ? merged : base;
 }
 
-async function fetchBTC() {
-  const local      = expandSeries(window.LOCAL_PRICES?.btc);
-  const localDays  = local ? Object.keys(local).length : 0;
+// Instant BTC base from the bundled file plus the cached series from a prior
+// visit — zero network. The file wins on overlapping days (final closes); days
+// beyond the file's end (a previous visit's Kraken top-up) survive from cache.
+function getBTCBase() {
+  const local  = expandSeries(window.LOCAL_PRICES?.btc);
+  const cached = seriesCacheGet('btc');
+  if (local && cached) return { ...cached, ...local };
+  return local || cached;
+}
 
-  // 1. Same-day localStorage cache — only trust it if it covers at least as
-  //    many days as the local file (guards against stale pre-file cache).
-  const cached = cacheGet('btc');
-  if (cached && Object.keys(cached).length >= localDays - 10) {
-    state.btcFromCache = true;
-    return cached;
-  }
-
-  // 2. Local file (window.LOCAL_PRICES written by fetch_data.py)
-  if (local && localDays > 100) {
-    el('loadingMsg').textContent    = 'Loading BTC from local file…';
-    el('loadingSubMsg').textContent = 'Topping up recent days from Kraken…';
-    state.btcFromCache = false;
-    const merged = await krakenTopUp(local);
-    cacheSet('btc', merged);
-    return merged;
-  }
-
-  // 3. Full paginated fetch from Kraken (no local file present)
+// Full paginated fetch from Kraken — only when there is no bundled file and
+// no cached series at all (first ever visit on a checkout without data/).
+async function fetchBTCFull() {
   state.btcFromCache = false;
   const prices = {};
   let since  = Math.floor(DATA_FROM.getTime() / 1000);
@@ -966,7 +986,7 @@ async function fetchBTC() {
   }
 
   if (!Object.keys(prices).length) throw new Error('No data returned from Kraken');
-  cacheSet('btc', prices);
+  seriesCacheSet('btc', prices);
   return prices;
 }
 
@@ -985,7 +1005,9 @@ async function fetchT(url, ms = 12000) {
 }
 
 // Parse a Yahoo Finance v8 chart JSON response → { 'YYYY-MM-DD': closePrice }
-function parseYahooJSON(json) {
+// minDays guards against junk/empty payloads: 50 for full-history fetches,
+// 1 for the short recent-window top-ups (which only span a couple of weeks).
+function parseYahooJSON(json, minDays = 50) {
   const result = json?.chart?.result?.[0];
   if (!result) return null;
   const timestamps = result.timestamp || [];
@@ -995,43 +1017,57 @@ function parseYahooJSON(json) {
     if (closes[i] != null)
       prices[new Date(timestamps[i] * 1000).toISOString().split('T')[0]] = closes[i];
   }
-  return Object.keys(prices).length > 50 ? prices : null;
+  return Object.keys(prices).length >= minDays ? prices : null;
+}
+
+// Fire all candidate URLs concurrently and resolve with the first response
+// that parses into a usable series. Trying them serially costs up to
+// attempts × timeout on GitHub Pages, where the direct Yahoo URLs are
+// CORS-blocked and only the proxies can succeed.
+function raceYahooAttempts(urls, ms, parse = parseYahooJSON) {
+  return new Promise(resolve => {
+    let pending = urls.length;
+    let settled = false;
+    if (!pending) { resolve(null); return; }
+    for (const url of urls) {
+      fetchT(url, ms)
+        .then(res => (res.ok ? res.json() : null))
+        .then(json => (json ? parse(json) : null))
+        .catch(() => null)
+        .then(prices => {
+          if (settled) return;
+          if (prices) { settled = true; resolve(prices); }
+          else if (--pending === 0) resolve(null);
+        });
+    }
+  });
 }
 
 async function fetchYahoo(symbol, cacheKey, label) {
-  // 1. Same-day localStorage cache — only trust it if the series itself is fresh.
-  //    (A stale series can get cached under today's date stamp if the page was
-  //    loaded before the daily data deploy; fall through to the local file then.)
-  const cached = cacheGet(cacheKey);
-  if (cached) {
-    const lastCached = Object.keys(cached).sort().pop();
-    if (!isStaleDate(lastCached, COMPARE_STALE_DAYS)) return { data: cached, fromCache: true };
-  }
-
-  // 2. Local file (data/prices-compare.js written by fetch_data.py) — lazy-loaded.
-  //    cacheKey is 'sp500' or 'gold' — matches the keys in LOCAL_PRICES_COMPARE.
-  let localForCompare = null;
+  // 1. Pick the fresher of the cached series (carried across days) and the
+  //    bundled file (data/prices-compare.js, lazy-loaded). cacheKey is 'sp500'
+  //    or 'gold' — matches the keys in LOCAL_PRICES_COMPARE. The file wins
+  //    ties so a deploy always supersedes an equally-fresh cache.
+  let base = seriesCacheGet(cacheKey);
+  let baseLast = base ? Object.keys(base).sort().pop() : null;
   try {
     el('loadingMsg').textContent = `Loading ${label} from local file…`;
     await loadCompareData();
     const local = expandSeries(window.LOCAL_PRICES_COMPARE?.[cacheKey]);
     if (local && Object.keys(local).length > 100) {
-      localForCompare = local;
-      cacheSet(cacheKey, local);
-
-      // If the pre-fetched compare data is fresh, use it immediately.
-      // Otherwise fall through and attempt live Yahoo (best-effort top-up).
-      const last = Object.keys(local).sort().pop();
-      if (!isStaleDate(last, COMPARE_STALE_DAYS)) {
-        return { data: local, fromCache: false };
-      }
+      const localLast = Object.keys(local).sort().pop();
+      if (!baseLast || localLast >= baseLast) { base = local; baseLast = localLast; }
     }
   } catch (_) {
     // Compare file missing or failed to load — fall through to live fetch.
   }
 
-  // 3. Live fetch — tries Yahoo Finance direct, then CORS proxies
-  // (we reach here for BTC fallback, or when compare local data is stale)
+  if (base && !isStaleDate(baseLast, COMPARE_STALE_DAYS)) {
+    return { data: base, fromCache: true };
+  }
+
+  // 2. Live fetch — base missing or stale. All sources raced in parallel;
+  //    the background top-up covers any remaining freshness gap later.
   el('loadingMsg').textContent    = `Fetching ${label} from Yahoo Finance…`;
   el('loadingSubMsg').textContent = isGitHubPages
     ? 'Compare data is refreshed daily by the GitHub Action'
@@ -1051,34 +1087,20 @@ async function fetchYahoo(symbol, cacheKey, label) {
     `https://corsproxy.io/?${encodeURIComponent(q2)}`,
   ];
 
-  for (const url of attempts) {
-    try {
-      const res = await fetchT(url, 12000);
-      if (!res.ok) continue;
-      const json   = await res.json();
-      const prices = parseYahooJSON(json);
-      if (prices) {
-        // Prefer the fresher of (stale local vs live) when doing best-effort top-up for compares
-        if (localForCompare) {
-          const localLast = Object.keys(localForCompare).sort().pop();
-          const liveLast = Object.keys(prices).sort().pop();
-          if (liveLast && (!localLast || liveLast >= localLast)) {
-            cacheSet(cacheKey, prices);
-            return { data: prices, fromCache: false };
-          } else {
-            return { data: localForCompare, fromCache: false };
-          }
-        }
-        cacheSet(cacheKey, prices);
-        return { data: prices, fromCache: false };
-      }
-    } catch { /* try next */ }
+  const prices = await raceYahooAttempts(attempts, 12000);
+  if (prices) {
+    // Prefer the fresher of (stale base vs live)
+    const liveLast = Object.keys(prices).sort().pop();
+    if (!baseLast || (liveLast && liveLast >= baseLast)) {
+      seriesCacheSet(cacheKey, prices);
+      return { data: prices, fromCache: false };
+    }
   }
 
-  // Live attempts failed — if we had a (possibly stale) local compare file, fall back to it
+  // Live attempts failed — if we had a (possibly stale) base, fall back to it
   // instead of hard error. This keeps the UI working while the user can run fetch_data.py.
-  if (localForCompare) {
-    return { data: localForCompare, fromCache: false };
+  if (base) {
+    return { data: base, fromCache: false };
   }
 
   throw new Error(`All sources failed for ${label}. Run fetch_data.py to use local data.`);
@@ -1142,21 +1164,30 @@ function startTicker() {
 // ═══════════════════════════════════════════════
 // FX RATE  (USD → THB)
 // ═══════════════════════════════════════════════
-async function fetchFXRate() {
-  const cached = cacheGet('fx_thb');
-  if (cached) { state.thbRate = cached; return; }
+function initFXRate() {
+  // Use any previously cached rate immediately — even from a prior day — so
+  // the first render never waits on the network; refresh in the background
+  // and silently recalc if the fresh rate differs. Only a first-ever visit
+  // in THB mode has no rate at all (init awaits the returned promise then).
+  const entry = cacheGetEntry('fx_thb');
+  if (entry && entry.v) state.thbRate = entry.v;
+  if (entry && entry.d === todayStr()) return Promise.resolve();
 
-  try {
-    const res  = await fetchT('https://open.er-api.com/v6/latest/USD', 8000);
-    const json = await res.json();
-    const rate = json?.rates?.THB;
-    if (rate) {
-      state.thbRate = rate;
-      cacheSet('fx_thb', rate);
+  return (async () => {
+    try {
+      const res  = await fetchT('https://open.er-api.com/v6/latest/USD', 8000);
+      const json = await res.json();
+      const rate = json?.rates?.THB;
+      if (rate) {
+        const changed = rate !== state.thbRate;
+        state.thbRate = rate;
+        cacheSet('fx_thb', rate);
+        if (changed && state.btcPrices) { renderTicker(); calculate(); }
+      }
+    } catch (e) {
+      console.warn('FX rate fetch failed:', e);
     }
-  } catch (e) {
-    console.warn('FX rate fetch failed:', e);
-  }
+  })();
 }
 
 // ═══════════════════════════════════════════════
@@ -1331,6 +1362,7 @@ function initChart() {
       maintainAspectRatio: false,
       animation: false,
       parsing: false,                                     // data already in {x,y} numeric form — skip Chart.js parsing
+      normalized: true,                                   // data is sorted & unique by x — skip Chart.js normalization pass
       devicePixelRatio: Math.min(1.5, window.devicePixelRatio || 1),   // cap paint cost on HiDPI/slow GPUs
       interaction: { mode: 'index', intersect: false },
       layout: { padding: { right: 30 } },
@@ -1379,24 +1411,19 @@ function initChart() {
       },
       scales: {
         x: {
-          type: 'time',
-          time: {
-            tooltipFormat: 'MMM d, yyyy',
-            displayFormats: { month: 'MMM yy', year: 'yyyy' }
-          },
+          // Linear axis over ms timestamps with our own label formatting —
+          // saves the entire date-fns adapter bundle (~12 KB gz + parse time).
+          // The tooltip title callback above already formats dates manually.
+          type: 'linear',
           grid: { color: c.grid },
           ticks: {
             color: c.tick,
             maxTicksLimit: 14,
             font: { size: 11 },
-            callback(value, index, ticks) {
-              const ts = ticks[index]?.value;
-              if (ts == null) return value;
-              const date = new Date(ts);
-              if (state.currency === 'thb') {
-                return date.toLocaleDateString('th-TH-u-ca-gregory', { month: 'short', year: '2-digit' });
-              }
-              return value;
+            callback(value) {
+              const date = new Date(value);
+              const locale = state.currency === 'thb' ? 'th-TH-u-ca-gregory' : 'en-US';
+              return date.toLocaleDateString(locale, { month: 'short', year: '2-digit' });
             }
           }
         },
@@ -1584,11 +1611,7 @@ async function calculate() {
       }
       try {
         const { data } = await fetchYahoo('^GSPC', 'sp500', 'S&P 500');
-        state.sp500Prices = data;
-
-        // On GitHub Pages (and in general) try a lightweight recent top-up so S&P
-        // stays reasonably close to BTC's live Kraken freshness between Action runs.
-        state.sp500Prices = await yahooRecentTopUp(state.sp500Prices, '^GSPC');
+        state.sp500Prices = data;   // recent top-up happens in startBackgroundTopUps()
       } catch (e) {
         console.warn('S&P 500 fetch failed:', e);
         if (isGitHubPages) {
@@ -1620,11 +1643,7 @@ async function calculate() {
       }
       try {
         const { data } = await fetchYahoo('GLD', 'gold', 'Gold');
-        state.goldPrices = data;
-
-        // On GitHub Pages (and in general) try a lightweight recent top-up so Gold
-        // stays reasonably close to BTC's live Kraken freshness between Action runs.
-        state.goldPrices = await yahooRecentTopUp(state.goldPrices, 'GLD');
+        state.goldPrices = data;    // recent top-up happens in startBackgroundTopUps()
       } catch (e) {
         console.warn('Gold fetch failed:', e);
         if (isGitHubPages) {
@@ -1770,35 +1789,79 @@ function setCurrency(curr) {
 // ═══════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════
+// Background freshness top-ups — run once, after the first paint. The page
+// renders instantly from bundled/cached data; these tasks merge any newer
+// closes into state concurrently, then a single silent recalc redraws.
+let _topUpsStarted = false;
+function startBackgroundTopUps() {
+  if (_topUpsStarted) return;
+  _topUpsStarted = true;
+
+  const lastOf = p => { const k = Object.keys(p); return k.length ? k.sort().pop() : null; };
+  const tasks = [];
+
+  if (state.btcPrices) {
+    const before = state.btcPrices;
+    tasks.push(krakenTopUp(before).then(merged => {
+      const changed = lastOf(merged) !== lastOf(before) || merged[lastOf(merged)] !== before[lastOf(before)];
+      state.btcPrices = merged;
+      seriesCacheSet('btc', merged);
+      const last = lastOf(merged);
+      if (last) state.latestBTCUSD = merged[last];
+      return changed;
+    }).catch(() => false));
+  }
+
+  for (const [stateKey, cacheKey, symbol] of [['sp500Prices', 'sp500', '^GSPC'], ['goldPrices', 'gold', 'GLD']]) {
+    if (!state[stateKey]) continue;
+    tasks.push(yahooRecentTopUp(state[stateKey], symbol).then(merged => {
+      if (merged === state[stateKey]) return false;   // no improvement found
+      state[stateKey] = merged;
+      seriesCacheSet(cacheKey, merged);
+      return true;
+    }).catch(() => false));
+  }
+
+  Promise.allSettled(tasks).then(results => {
+    const improved = results.some(r => r.status === 'fulfilled' && r.value);
+    if (improved && state.btcPrices) calculate();
+  });
+}
+
 async function init() {
   initChart();
-  const hasLocal = Array.isArray(window.LOCAL_PRICES?.btc?.close) && window.LOCAL_PRICES.btc.close.length > 100;
-  showLoading(
-    hasLocal ? 'Loading BTC from local file…' : 'Fetching BTC from Kraken…',
-    hasLocal
-      ? (isGitHubPages ? 'Daily updates via GitHub Actions' : 'Topping up recent days…')
-      : 'Topping up recent days…'
-  );
 
-  // Eagerly start loading S&P/Gold compare data (prices-compare.js) so the lines
-  // render immediately when enabled by default (no extra loading flash in calculate()).
+  // Kick off compare data + FX immediately; neither blocks the first render.
   loadCompareData().catch(() => {});
+  const fxReady = initFXRate();
 
-  // Fetch FX rate in parallel with BTC data; both must be ready before first calculate()
-  const fxPromise = fetchFXRate();
-
-  try {
-    state.btcPrices = await fetchBTC();
-    await fxPromise;
-
-    const priceKeys  = Object.keys(state.btcPrices).sort();
-    const latestDate = priceKeys[priceKeys.length - 1];
-    const latestPrice = state.btcPrices[latestDate];
-    state.latestBTCUSD = latestPrice;
-
+  const base = getBTCBase();
+  if (base && Object.keys(base).length > 100) {
+    // Fast path: render from bundled/cached data with zero network round
+    // trips, then refresh the last few days in the background.
+    if (state.currency === 'thb' && !state.thbRate) await fxReady;  // first-ever visit only
+    state.btcPrices = base;
+    const priceKeys = Object.keys(base).sort();
+    state.latestBTCUSD = base[priceKeys[priceKeys.length - 1]];
     hideLoading();
     await calculate();
     startTicker();
+    startBackgroundTopUps();
+    return;
+  }
+
+  // Slow path: no bundled file and no cached series — full Kraken fetch.
+  showLoading('Fetching BTC from Kraken…', 'Run fetch_data.py once to skip this step');
+  try {
+    const prices = await fetchBTCFull();
+    await fxReady;
+    state.btcPrices = prices;
+    const priceKeys = Object.keys(prices).sort();
+    state.latestBTCUSD = prices[priceKeys[priceKeys.length - 1]];
+    hideLoading();
+    await calculate();
+    startTicker();
+    startBackgroundTopUps();
   } catch (e) {
     hideLoading();
     console.error('BTC fetch failed:', e);
@@ -1831,13 +1894,26 @@ function toggleCompare(which) {
 }
 
 
-// Start — restore theme, apply translations, then init
-if (localStorage.getItem('theme') === 'light') {
-  document.body.classList.add('light-mode');
-  el('themeBtn').innerHTML = SVG_MOON;
-}
+// Start — the light-mode class is applied by the tiny script at the top of
+// <body> before first paint (no dark flash); here we only sync the toggle icon.
+if (document.body.classList.contains('light-mode')) el('themeBtn').innerHTML = SVG_MOON;
 applyTranslations();
-init();
+
+// init() needs Chart and window.LOCAL_PRICES from the deferred scripts in
+// <head>, which are guaranteed to have executed by DOMContentLoaded.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
+
+// Offline support + instant revisits for static assets. GitHub Pages sends
+// max-age=600, so without this every revisit after 10 minutes re-downloads
+// the chart lib and data files. https-only: keeps local dev (python -m
+// http.server) free of stale-cache surprises while editing.
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+}
 </script>
 </body>
 </html>
