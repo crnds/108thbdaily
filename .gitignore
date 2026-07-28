@@ -3,3 +3,10 @@ __pycache__/
 .DS_Store
 fetch_data.log
 *.log
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
